@@ -66,7 +66,15 @@ public final class Snapshot implements Serializable {
         return version;
     }
 
+    public long getVersion() {
+        return version;
+    }
+
     public Map<String, SettingDefinition> definitions() {
+        return definitions;
+    }
+
+    public Map<String, SettingDefinition> getDefinitions() {
         return definitions;
     }
 
@@ -79,6 +87,10 @@ public final class Snapshot implements Serializable {
     }
 
     public Map<String, Map<Scope, OverrideValue>> overridesByKey() {
+        return overridesByKey;
+    }
+
+    public Map<String, Map<Scope, OverrideValue>> getOverridesByKey() {
         return overridesByKey;
     }
 
