@@ -14,6 +14,7 @@
     <modules>
         <module>config-core</module>
         <module>config-server</module>
+        <module>config-client</module>
     </modules>
 
     <properties>
@@ -41,6 +42,11 @@
             <dependency>
                 <groupId>com.moveinsync</groupId>
                 <artifactId>config-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.moveinsync</groupId>
+                <artifactId>config-client</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
