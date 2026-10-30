@@ -13,3 +13,37 @@ spring:
       ddl-auto: create-drop
     show-sql: false
     open-in-view: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    prometheus:
+      enabled: true
+    health:
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+security:
+  enabled: false
+  api-keys:
+    - key: "test-admin-key"
+      role: ADMIN
+      tenantId: "*"
+    - key: "test-operator-google"
+      role: OPERATOR
+      tenantId: "google"
+    - key: "test-viewer-google"
+      role: VIEWER
+      tenantId: "google"
+    - key: "test-operator-uber"
+      role: OPERATOR
+      tenantId: "uber"
+    - key: "test-viewer-uber"
+      role: VIEWER
+      tenantId: "uber"

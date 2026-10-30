@@ -20,11 +20,44 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: "*"
   endpoint:
     health:
       show-details: always
+    prometheus:
+      enabled: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
 
-logging:
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+security:
+  enabled: ${SECURITY_ENABLED:true}
+  api-keys:
+    - key: "admin-secret-key"
+      role: ADMIN
+      tenantId: "*"
+    - key: "operator-google-key"
+      role: OPERATOR
+      tenantId: "google"
+    - key: "viewer-google-key"
+      role: VIEWER
+      tenantId: "google"
+    - key: "operator-uber-key"
+      role: OPERATOR
+      tenantId: "uber"
+    - key: "viewer-uber-key"
+      role: VIEWER
+      tenantId: "uber"
+    - key: "operator-clienta-key"
+      role: OPERATOR
+      tenantId: "clientA"
+    - key: "viewer-clienta-key"
+      role: VIEWER
+      tenantId: "clientA"
+    - key: "operator-clientb-key"
+      role: OPERATOR
+      tenantId: "clientB"
+    - key: "viewer-clientb-key"
+      role: VIEWER
+      tenantId: "clientB"

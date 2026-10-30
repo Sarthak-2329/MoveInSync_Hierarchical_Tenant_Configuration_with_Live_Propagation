@@ -56,6 +56,12 @@ class ConfigServerIntegrationTest {
     private TenantFilterService tenantFilterService;
 
     @Autowired
+    private com.moveinsync.config.server.cache.TenantCacheService tenantCacheService;
+
+    @Autowired
+    private com.moveinsync.config.server.metrics.ConfigMetrics configMetrics;
+
+    @Autowired
     private SseBroadcaster sseBroadcaster;
 
     @BeforeEach
@@ -262,7 +268,9 @@ class ConfigServerIntegrationTest {
         ConfigEngineService restartedService = new ConfigEngineService(
                 changeLogRepository,
                 tenantFilterService,
+                tenantCacheService,
                 sseBroadcaster,
+                configMetrics,
                 objectMapper
         );
         restartedService.init(); // replay log

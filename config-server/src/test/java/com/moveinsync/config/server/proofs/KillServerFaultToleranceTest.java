@@ -149,14 +149,14 @@ public class KillServerFaultToleranceTest {
     private ConfigurableApplicationContext startServer(Path dbPath) {
         String jdbcUrl = "jdbc:h2:file:" + dbPath.resolve("configdb") + ";DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE";
         return new SpringApplicationBuilder(ConfigServerApplication.class)
-                .properties(
-                        "server.port=0",
-                        "spring.datasource.url=" + jdbcUrl,
-                        "spring.datasource.driverClassName=org.h2.Driver",
-                        "spring.jpa.hibernate.ddl-auto=update",
-                        "spring.main.banner-mode=off"
-                )
-                .run();
+                .run(
+                        "--server.port=0",
+                        "--security.enabled=false",
+                        "--spring.datasource.url=" + jdbcUrl,
+                        "--spring.datasource.driverClassName=org.h2.Driver",
+                        "--spring.jpa.hibernate.ddl-auto=update",
+                        "--spring.main.banner-mode=off"
+                );
     }
 
     private int getServerPort(ConfigurableApplicationContext context) {

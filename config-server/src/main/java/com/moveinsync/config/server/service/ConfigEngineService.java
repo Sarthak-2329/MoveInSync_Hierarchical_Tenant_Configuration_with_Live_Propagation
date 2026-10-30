@@ -1,9 +1,7 @@
 package com.moveinsync.config.server.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.moveinsync.config.core.engine.ChangeSetApplier;
 import com.moveinsync.config.core.engine.Resolver;
 import com.moveinsync.config.core.engine.SnapshotDiffCalculator;
@@ -15,8 +13,10 @@ import com.moveinsync.config.core.model.ResolutionExplanation;
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.SettingDefinition;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.server.cache.TenantCacheService;
 import com.moveinsync.config.server.dto.DeltaResponse;
 import com.moveinsync.config.server.dto.RollbackResponse;
+import com.moveinsync.config.server.metrics.ConfigMetrics;
 import com.moveinsync.config.server.persistence.ChangeKind;
 import com.moveinsync.config.server.persistence.ChangeLogEntity;
 import com.moveinsync.config.server.persistence.ChangeLogRepository;
@@ -27,9 +27,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -39,14 +37,16 @@ import java.util.concurrent.locks.ReentrantLock;
  * Central engine coordinating configuration persistence, memory snapshot swaps,
  * replay on startup, and SSE live notifications.
  *
- * Concurrency & Write Ordering Guarantee:
+ * <p><strong>Concurrency & Write Ordering Guarantee:</strong>
  * On every write:
- * 1. Pre-validate all items (fail-fast without side effects).
- * 2. Commit transaction to H2 database change log.
- * 3. Construct and atomically swap the in-memory {@link AtomicReference<Snapshot>}.
- * 4. Broadcast the new version hint via SSE.
+ * <ol>
+ *   <li>Pre-validate all items (fail-fast without side effects).</li>
+ *   <li>Commit transaction to H2 database change log.</li>
+ *   <li>Construct and atomically swap the in-memory {@link AtomicReference<Snapshot>}.</li>
+ *   <li>Broadcast the new version hint via SSE.</li>
+ * </ol>
  *
- * Result: Reads are non-blocking and instant (sub-microsecond), writes are strictly serialized,
+ * <p>Result: Reads are non-blocking and instant (sub-microsecond), writes are strictly serialized,
  * and any acknowledged write is guaranteed durable across crashes.
  */
 @Service
@@ -56,7 +56,9 @@ public class ConfigEngineService {
 
     private final ChangeLogRepository changeLogRepository;
     private final TenantFilterService tenantFilterService;
+    private final TenantCacheService tenantCacheService;
     private final SseBroadcaster sseBroadcaster;
+    private final ConfigMetrics configMetrics;
     private final ObjectMapper objectMapper;
 
     // Concurrency controls
@@ -70,12 +72,16 @@ public class ConfigEngineService {
     public ConfigEngineService(
             ChangeLogRepository changeLogRepository,
             TenantFilterService tenantFilterService,
+            TenantCacheService tenantCacheService,
             SseBroadcaster sseBroadcaster,
+            ConfigMetrics configMetrics,
             ObjectMapper objectMapper
     ) {
         this.changeLogRepository = changeLogRepository;
         this.tenantFilterService = tenantFilterService;
+        this.tenantCacheService = tenantCacheService;
         this.sseBroadcaster = sseBroadcaster;
+        this.configMetrics = configMetrics;
         this.objectMapper = objectMapper;
     }
 
@@ -103,6 +109,7 @@ public class ConfigEngineService {
 
             versionSequence.set(maxVersion);
             currentSnapshot.set(snapshot);
+            tenantCacheService.invalidateAll();
             log.info("Replay completed successfully. Reconstructed {} log entries. Current version: {}",
                     logEntries.size(), maxVersion);
         } catch (Exception ex) {
@@ -142,8 +149,9 @@ public class ConfigEngineService {
             currentSnapshot.set(nextSnapshot);
             snapshotHistory.put(newVersion, nextSnapshot);
 
-            // Step 4: Live propagation notification
+            // Step 4: Live propagation notification & metrics
             sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
 
             log.info("Registered definition '{}' at version {}", definition.key(), newVersion);
             return nextSnapshot;
@@ -183,8 +191,9 @@ public class ConfigEngineService {
             currentSnapshot.set(nextSnapshot);
             snapshotHistory.put(newVersion, nextSnapshot);
 
-            // Step 4: Broadcast SSE push hint
+            // Step 4: Broadcast SSE push hint & record metric
             sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
 
             log.info("Applied change set '{}' by '{}' with {} items. Advanced to version {}",
                     changeSet.id(), changeSet.author(), changeSet.items().size(), newVersion);
@@ -199,7 +208,7 @@ public class ConfigEngineService {
     /**
      * Rolls back state to any historical version N in one atomic call.
      *
-     * Invariant: Monotonic versioning. Rollback creates a NEW version N' > currentVersion,
+     * <p><strong>Invariant:</strong> Monotonic versioning. Rollback creates a NEW version N' > currentVersion,
      * whose state matches historical version N. It never decrements the counter.
      */
     @Transactional
@@ -242,8 +251,9 @@ public class ConfigEngineService {
             currentSnapshot.set(nextSnapshot);
             snapshotHistory.put(newVersion, nextSnapshot);
 
-            // Broadcast
+            // Broadcast & metrics
             sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
 
             log.info("Rolled back state from version {} to {} as NEW version {}",
                     current.version(), targetVersion, newVersion);
@@ -256,16 +266,23 @@ public class ConfigEngineService {
     }
 
     /**
-     * Retrieves the current snapshot isolated for the caller's tenant.
+     * Retrieves the current snapshot isolated for the caller's tenant with Caffeine caching.
      */
     public Snapshot getCurrentSnapshot(String tenantId) {
-        return tenantFilterService.filterSnapshot(currentSnapshot.get(), tenantId);
+        Snapshot master = currentSnapshot.get();
+        if (tenantId == null || tenantId.isBlank() || "*".equals(tenantId)) {
+            return master;
+        }
+        return tenantCacheService.getSnapshot(tenantId, master.version(), tid ->
+                tenantFilterService.filterSnapshot(master, tid)
+        );
     }
 
     /**
-     * Retrieves incremental changes since a specified version, isolated for the caller's tenant.
+     * Retrieves incremental changes since a specified version, isolated for the caller's tenant with Caffeine caching.
      */
     public DeltaResponse getChangesSince(long sinceVersion, String tenantId) {
+        configMetrics.recordDeltaRequest();
         Snapshot current = currentSnapshot.get();
         long currentVer = current.version();
 
@@ -274,13 +291,19 @@ public class ConfigEngineService {
             return DeltaResponse.from(ConfigDelta.empty(currentVer), currentVer);
         }
 
+        if (sinceVersion > 0) {
+            configMetrics.recordPollHeal();
+        }
+
         Snapshot baseline = getSnapshotAtVersion(sinceVersion);
         if (baseline == null) {
             baseline = Snapshot.empty();
         }
 
         ConfigDelta rawDelta = SnapshotDiffCalculator.calculateDiff(baseline, current);
-        ConfigDelta isolatedDelta = tenantFilterService.filterDelta(rawDelta, tenantId);
+        ConfigDelta isolatedDelta = tenantCacheService.getDelta(tenantId, sinceVersion, currentVer, tid ->
+                tenantFilterService.filterDelta(rawDelta, tid)
+        );
 
         return DeltaResponse.from(isolatedDelta, currentVer);
     }
