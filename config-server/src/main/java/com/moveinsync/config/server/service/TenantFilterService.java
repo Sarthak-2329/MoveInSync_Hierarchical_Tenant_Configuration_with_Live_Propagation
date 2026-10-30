@@ -6,6 +6,7 @@ import com.moveinsync.config.core.model.Level;
 import com.moveinsync.config.core.model.OverrideValue;
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.core.model.StagedRollout;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -17,9 +18,9 @@ import java.util.Map;
  * Enforces strict multi-tenant data isolation.
  *
  * Guarantees:
- * - A tenant NEVER receives override data belonging to another tenant.
+ * - A tenant NEVER receives override data or staged rollouts belonging to another tenant.
  * - Every tenant receives all GLOBAL definitions and GLOBAL overrides.
- * - Scoped overrides (CLIENT, OFFICE, SHIFT) are stripped unless they match the caller's tenantId.
+ * - Scoped overrides (CLIENT, OFFICE, SHIFT) and staged rollouts are stripped unless they match the caller's tenantId.
  */
 @Service
 public class TenantFilterService {
@@ -32,7 +33,7 @@ public class TenantFilterService {
      * @return tenant-isolated Snapshot view
      */
     public Snapshot filterSnapshot(Snapshot snapshot, String tenantId) {
-        if (tenantId == null || tenantId.isBlank()) {
+        if (tenantId == null || tenantId.isBlank() || "*".equals(tenantId)) {
             return snapshot;
         }
 
@@ -54,7 +55,15 @@ public class TenantFilterService {
             }
         }
 
-        return new Snapshot(snapshot.version(), snapshot.definitions(), filteredOverrides);
+        Map<String, StagedRollout> filteredRollouts = new HashMap<>();
+        for (Map.Entry<String, StagedRollout> entry : snapshot.stagedRollouts().entrySet()) {
+            StagedRollout rollout = entry.getValue();
+            if (rollout.targetClientId() == null || tenantId.equals(rollout.targetClientId())) {
+                filteredRollouts.put(entry.getKey(), rollout);
+            }
+        }
+
+        return new Snapshot(snapshot.version(), snapshot.definitions(), filteredOverrides, filteredRollouts);
     }
 
     /**
@@ -65,7 +74,7 @@ public class TenantFilterService {
      * @return tenant-isolated ConfigDelta
      */
     public ConfigDelta filterDelta(ConfigDelta delta, String tenantId) {
-        if (tenantId == null || tenantId.isBlank()) {
+        if (tenantId == null || tenantId.isBlank() || "*".equals(tenantId)) {
             return delta;
         }
 
@@ -83,12 +92,20 @@ public class TenantFilterService {
             }
         }
 
+        List<StagedRollout> filteredRollouts = new ArrayList<>();
+        for (StagedRollout rollout : delta.updatedRollouts()) {
+            if (rollout.targetClientId() == null || tenantId.equals(rollout.targetClientId())) {
+                filteredRollouts.add(rollout);
+            }
+        }
+
         return new ConfigDelta(
                 delta.fromVersion(),
                 delta.toVersion(),
                 delta.updatedDefinitions(),
                 filteredUpdates,
-                filteredDeletes
+                filteredDeletes,
+                filteredRollouts
         );
     }
 }

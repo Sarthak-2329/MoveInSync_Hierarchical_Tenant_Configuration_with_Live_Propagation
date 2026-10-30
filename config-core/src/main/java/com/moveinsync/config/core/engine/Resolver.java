@@ -8,6 +8,7 @@ import com.moveinsync.config.core.model.ResolutionExplanation.CandidateEvaluatio
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.SettingDefinition;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.core.model.StagedRollout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,13 +19,14 @@ import java.util.Objects;
  *
  * Implements the most-specific-wins algorithm across the hierarchy:
  * 1. SHIFT  (clientId, officeId, shiftId)
- * 2. OFFICE (clientId, officeId, null)
- * 3. CLIENT (clientId, null, null)
- * 4. GLOBAL override (null, null, null)
- * 5. Definition Default (fallback)
+ * 2. CANARY / STAGED ROLLOUT (active staged canary override for officeId)
+ * 3. OFFICE (clientId, officeId, null)
+ * 4. CLIENT (clientId, null, null)
+ * 5. GLOBAL override (null, null, null)
+ * 6. Definition Default (fallback)
  *
  * Computational Complexity:
- * - Time: O(1) constant time. At most 4 hash map lookups and 1 definition lookup.
+ * - Time: O(1) constant time. Hash map lookups and at most 1 definition lookup.
  * - Space: O(1) auxiliary space (zero allocations on the read hot-path).
  */
 public final class Resolver {
@@ -61,7 +63,15 @@ public final class Resolver {
             }
         }
 
-        // 2. Check OFFICE level override
+        // 2. Check ACTIVE Staged Rollout for candidate office (Canary)
+        if (effectiveScope.officeId() != null) {
+            StagedRollout activeRollout = snapshot.findActiveRollout(key, effectiveScope.clientId(), effectiveScope.officeId());
+            if (activeRollout != null) {
+                return activeRollout.stagedValue();
+            }
+        }
+
+        // 3. Check OFFICE level override
         Scope officeScope = effectiveScope.projectToLevel(Level.OFFICE);
         if (officeScope != null) {
             OverrideValue officeOverride = snapshot.getOverride(key, officeScope);
@@ -70,7 +80,7 @@ public final class Resolver {
             }
         }
 
-        // 3. Check CLIENT level override
+        // 4. Check CLIENT level override
         Scope clientScope = effectiveScope.projectToLevel(Level.CLIENT);
         if (clientScope != null) {
             OverrideValue clientOverride = snapshot.getOverride(key, clientScope);
@@ -79,13 +89,13 @@ public final class Resolver {
             }
         }
 
-        // 4. Check GLOBAL level override
+        // 5. Check GLOBAL level override
         OverrideValue globalOverride = snapshot.getOverride(key, Scope.global());
         if (globalOverride != null) {
             return globalOverride.value();
         }
 
-        // 5. Fallback to Setting Definition Default
+        // 6. Fallback to Setting Definition Default
         return definition.defaultValue();
     }
 
@@ -120,7 +130,7 @@ public final class Resolver {
             throw new SettingNotFoundException(key);
         }
 
-        List<CandidateEvaluation> evaluations = new ArrayList<>(5);
+        List<CandidateEvaluation> evaluations = new ArrayList<>(6);
         Level winningLevel = null;
         Object winningValue = null;
 
@@ -140,7 +150,30 @@ public final class Resolver {
             ));
         }
 
-        // 2. Evaluate OFFICE
+        // 2. Evaluate ACTIVE Staged Rollout (Canary Office)
+        if (effectiveScope.officeId() != null) {
+            StagedRollout activeRollout = snapshot.findActiveRollout(key, effectiveScope.clientId(), effectiveScope.officeId());
+            boolean hasRollout = activeRollout != null;
+            boolean isRolloutWinner = hasRollout && winningLevel == null;
+            if (isRolloutWinner) {
+                winningLevel = Level.OFFICE;
+                winningValue = activeRollout.stagedValue();
+            }
+            if (hasRollout) {
+                evaluations.add(new CandidateEvaluation(
+                        Level.OFFICE,
+                        effectiveScope.projectToLevel(Level.OFFICE),
+                        activeRollout.stagedValue(),
+                        true,
+                        isRolloutWinner,
+                        isRolloutWinner
+                                ? "Selected: Active Staged Rollout (Canary on office: " + effectiveScope.officeId() + ", rolloutId: " + activeRollout.id() + ")"
+                                : "Shadowed by higher priority SHIFT override"
+                ));
+            }
+        }
+
+        // 3. Evaluate OFFICE
         Scope officeScope = effectiveScope.projectToLevel(Level.OFFICE);
         if (officeScope != null) {
             OverrideValue override = snapshot.getOverride(key, officeScope);
@@ -152,11 +185,11 @@ public final class Resolver {
             }
             evaluations.add(new CandidateEvaluation(
                     Level.OFFICE, officeScope, exists ? override.value() : null, exists, isWinner,
-                    exists ? (isWinner ? "Selected: Match at OFFICE level" : "Shadowed by higher priority SHIFT override") : "No override configured at OFFICE level"
+                    exists ? (isWinner ? "Selected: Match at OFFICE level" : "Shadowed by higher priority override") : "No override configured at OFFICE level"
             ));
         }
 
-        // 3. Evaluate CLIENT
+        // 4. Evaluate CLIENT
         Scope clientScope = effectiveScope.projectToLevel(Level.CLIENT);
         if (clientScope != null) {
             OverrideValue override = snapshot.getOverride(key, clientScope);
@@ -172,7 +205,7 @@ public final class Resolver {
             ));
         }
 
-        // 4. Evaluate GLOBAL override
+        // 5. Evaluate GLOBAL override
         OverrideValue globalOverride = snapshot.getOverride(key, Scope.global());
         boolean hasGlobalOverride = globalOverride != null;
         boolean isGlobalWinner = hasGlobalOverride && winningLevel == null;
@@ -186,7 +219,7 @@ public final class Resolver {
                 hasGlobalOverride ? (isGlobalWinner ? "Selected: Match at GLOBAL override level" : "Shadowed by higher priority override") : "No override configured at GLOBAL level"
         ));
 
-        // 5. Evaluate Schema Default
+        // 6. Evaluate Schema Default
         boolean isDefaultWinner = winningLevel == null;
         if (isDefaultWinner) {
             winningLevel = Level.GLOBAL;

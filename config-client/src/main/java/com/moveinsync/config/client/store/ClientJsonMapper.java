@@ -16,6 +16,7 @@ import com.moveinsync.config.core.model.OverrideValue;
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.SettingDefinition;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.core.model.StagedRollout;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -128,7 +129,18 @@ public final class ClientJsonMapper {
                     }
                 }
 
-                return new Snapshot(version, defs, overrides);
+                Map<String, StagedRollout> rollouts = new HashMap<>();
+                if (node.has("stagedRollouts")) {
+                    JsonNode rolloutsNode = node.get("stagedRollouts");
+                    Iterator<Map.Entry<String, JsonNode>> rolloutFields = rolloutsNode.fields();
+                    while (rolloutFields.hasNext()) {
+                        Map.Entry<String, JsonNode> entry = rolloutFields.next();
+                        StagedRollout sr = ctxt.readTreeAsValue(entry.getValue(), StagedRollout.class);
+                        rollouts.put(entry.getKey(), sr);
+                    }
+                }
+
+                return new Snapshot(version, defs, overrides, rollouts);
             }
         });
 

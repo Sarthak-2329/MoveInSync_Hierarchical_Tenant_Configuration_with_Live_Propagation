@@ -52,7 +52,7 @@ mvn spring-boot:run -pl config-server
 
 ## 3. Core Domain Assumptions & Invariants
 
-- **Resolution Hierarchy:** Most specific wins: `SHIFT` > `OFFICE` > `CLIENT` > `GLOBAL Override` > `Definition Default`.
+- **Resolution Hierarchy:** Most specific wins: `SHIFT` > `CANARY STAGED ROLLOUT` > `OFFICE` > `CLIENT` > `GLOBAL Override` > `Definition Default`.
 - **Validation Rules:**
   - `NUMBER`: Min/max boundaries.
   - `DURATION`: Min/max positive duration.
@@ -169,6 +169,36 @@ curl -X GET http://localhost:8080/actuator/health
 
 # Prometheus metrics scrape endpoint
 curl -X GET http://localhost:8080/actuator/prometheus
+```
+
+### 4.11 Staged Rollouts to Canary Offices & Promotion (Stage 7)
+Stage a configuration override targeting canary offices before company-wide promotion:
+```bash
+# 1. Stage canary rollout for Bangalore office
+curl -X POST http://localhost:8080/api/rollout \
+  -H "X-API-KEY: operator-google-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "ro-blr-cutoff",
+    "settingKey": "booking.cutoff.minutes",
+    "targetClientId": "google",
+    "canaryOfficeIds": ["bangalore"],
+    "targetLevel": "CLIENT",
+    "stagedValue": 45.0,
+    "reason": "Canary test 45m cut-off in Bangalore"
+  }'
+
+# 2. Promote canary override company-wide to all Google offices
+curl -X POST http://localhost:8080/api/rollout/ro-blr-cutoff/promote \
+  -H "X-API-KEY: operator-google-key" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Canary verified, promote company-wide"}'
+
+# 3. Discard / abort a canary rollout immediately
+curl -X POST http://localhost:8080/api/rollout/ro-blr-cutoff/discard \
+  -H "X-API-KEY: operator-google-key" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Aborting canary due to issues"}'
 ```
 
 ---

@@ -15,7 +15,8 @@ public record ConfigDelta(
         long toVersion,
         List<SettingDefinition> updatedDefinitions,
         List<OverrideValue> updatedOverrides,
-        List<DeletedOverrideKey> deletedOverrides
+        List<DeletedOverrideKey> deletedOverrides,
+        List<StagedRollout> updatedRollouts
 ) implements Serializable {
 
     public ConfigDelta {
@@ -28,14 +29,40 @@ public record ConfigDelta(
         deletedOverrides = (deletedOverrides != null)
                 ? Collections.unmodifiableList(List.copyOf(deletedOverrides))
                 : Collections.emptyList();
+        updatedRollouts = (updatedRollouts != null)
+                ? Collections.unmodifiableList(List.copyOf(updatedRollouts))
+                : Collections.emptyList();
+    }
+
+    /**
+     * Backward-compatible 5-argument constructor without rollouts.
+     */
+    public ConfigDelta(
+            long fromVersion,
+            long toVersion,
+            List<SettingDefinition> updatedDefinitions,
+            List<OverrideValue> updatedOverrides,
+            List<DeletedOverrideKey> deletedOverrides
+    ) {
+        this(fromVersion, toVersion, updatedDefinitions, updatedOverrides, deletedOverrides, Collections.emptyList());
     }
 
     public static ConfigDelta empty(long version) {
-        return new ConfigDelta(version, version, Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+        return new ConfigDelta(
+                version,
+                version,
+                Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.emptyList(),
+                Collections.emptyList()
+        );
     }
 
     public boolean isEmpty() {
-        return updatedDefinitions.isEmpty() && updatedOverrides.isEmpty() && deletedOverrides.isEmpty();
+        return updatedDefinitions.isEmpty()
+                && updatedOverrides.isEmpty()
+                && deletedOverrides.isEmpty()
+                && updatedRollouts.isEmpty();
     }
 
     /**

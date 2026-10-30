@@ -6,5 +6,8 @@ package com.moveinsync.config.server.persistence;
 public enum ChangeKind {
     NORMAL,
     ROLLBACK,
-    DEFINITION
+    DEFINITION,
+    STAGED_ROLLOUT,
+    ROLLOUT_PROMOTE,
+    ROLLOUT_DISCARD
 }

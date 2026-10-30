@@ -123,3 +123,44 @@ The system provides **Sequential Consistency for writes** and **Bounded Eventual
 3. **Full Snapshot Heap Footprint (Memory Limit: ~1,000,000 Keys):**
    - *Bottleneck:* Keeping complete hierarchical snapshots in memory requires ~100MB of RAM for 100,000 active settings across hundreds of clients. At 10,000,000 keys, storing multiple historical versions in server heap would cause GC pressure.
    - *Mitigation for 10x:* Partition configurations by tenant shard, loading only active tenant trees into server Caffeine memory on demand and archiving older historical snapshots to object storage.
+
+
+---
+
+## 7. Staged Rollouts (Canary Deployment of Config)
+
+To prevent catastrophic configuration mistakes across hundreds of offices, the platform supports **Staged Rollouts** (Stage 7):
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE: POST /api/rollout (Target Canary Offices)
+    state ACTIVE {
+        [*] --> CanaryServing
+        CanaryServing: Canary Offices resolve stagedValue
+        CanaryServing: Baseline Offices resolve existing CLIENT/GLOBAL/Default
+    }
+    ACTIVE --> PROMOTED: POST /api/rollout/{id}/promote
+    state PROMOTED {
+        [*] --> PermanentOverride
+        PermanentOverride: ALL Offices resolve promoted value
+    }
+    ACTIVE --> DISCARDED: POST /api/rollout/{id}/discard
+    state DISCARDED {
+        [*] --> Reverted
+        Reverted: Canary Offices immediately revert to baseline
+    }
+```
+
+### Hierarchy Precedence with Canary Rollouts
+1. **`SHIFT` Override:** `(clientId, officeId, shiftId)` &mdash; Most specific.
+2. **`CANARY / STAGED ROLLOUT`:** If the query scope matches an `ACTIVE` staged rollout's `canaryOfficeIds`.
+3. **`OFFICE` Override:** `(clientId, officeId)` &mdash; Permanent office override.
+4. **`CLIENT` Override:** `(clientId)` &mdash; Permanent client override.
+5. **`GLOBAL` Override:** Platform-wide override.
+6. **`Setting Definition Default`:** Fallback schema default.
+
+### Operational Invariants
+- **Monotonic Progression:** Creating, promoting, or discarding a rollout generates a strictly increasing version and persists to the append-only H2 log (`ChangeKind.STAGED_ROLLOUT`, `ROLLOUT_PROMOTE`, `ROLLOUT_DISCARD`).
+- **Canary Isolation:** Un-targeted offices under the same client and all other tenants observe 0 side-effects during active staging.
+- **Explain Mode Visibility:** When resolving a canary office, `/api/config/explain` explicitly identifies the active rollout candidate and its rollout ID.
+- **Durability & Replay:** Full rollout state and transitions are reconstructed deterministically from H2 transaction logs during crash recovery.

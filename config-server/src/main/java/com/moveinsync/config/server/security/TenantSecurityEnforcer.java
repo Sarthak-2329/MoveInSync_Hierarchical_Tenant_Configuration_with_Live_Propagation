@@ -73,6 +73,35 @@ public class TenantSecurityEnforcer {
     }
 
     /**
+     * Enforces write permissions for managing staged rollouts (create, promote, discard).
+     *
+     * @param targetClientId tenant targeted by the rollout (or null for global)
+     */
+    public void enforceRolloutWrite(String targetClientId) {
+        if (!securityProperties.isEnabled()) {
+            return;
+        }
+        AuthenticatedUser user = AuthContext.getCurrentUser();
+        if (user == null) {
+            throw new AccessDeniedException("Unauthorized: Authentication required");
+        }
+
+        if (user.isViewer()) {
+            throw new AccessDeniedException("Forbidden: Viewers have read-only access");
+        }
+
+        if (user.isOperator()) {
+            String operatorTenant = user.tenantId();
+            if (targetClientId == null || !targetClientId.equals(operatorTenant)) {
+                throw new AccessDeniedException(
+                        "Forbidden: Operators can only manage rollouts for their assigned tenant '"
+                                + operatorTenant + "'"
+                );
+            }
+        }
+    }
+
+    /**
      * Resolves and verifies the effective tenant for a read query.
      *
      * @param requestedTenant tenant passed via header or query param

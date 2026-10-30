@@ -6,6 +6,7 @@ import com.moveinsync.config.core.model.OverrideValue;
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.SettingDefinition;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.core.model.StagedRollout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,7 +21,7 @@ import java.util.Objects;
  * 2. Rollback previews (generating the diff of what will change when rolling back).
  *
  * Computational Complexity:
- * - Time: O(D + O_v) where D is definitions count and O_v is overrides count.
+ * - Time: O(D + O_v + R) where D is definitions count, O_v is overrides count, and R is rollouts count.
  * - Space: O(Δ) proportional to the number of changed elements.
  */
 public final class SnapshotDiffCalculator {
@@ -34,7 +35,7 @@ public final class SnapshotDiffCalculator {
      *
      * @param fromSnapshot the baseline snapshot (e.g. client's current version)
      * @param toSnapshot the target snapshot (e.g. server's latest version)
-     * @return ConfigDelta containing added/updated definitions, added/updated overrides, and deleted overrides
+     * @return ConfigDelta containing added/updated definitions, overrides, deletes, and staged rollouts
      */
     public static ConfigDelta calculateDiff(Snapshot fromSnapshot, Snapshot toSnapshot) {
         Objects.requireNonNull(fromSnapshot, "fromSnapshot must not be null");
@@ -43,6 +44,7 @@ public final class SnapshotDiffCalculator {
         List<SettingDefinition> updatedDefs = new ArrayList<>();
         List<OverrideValue> updatedOverrides = new ArrayList<>();
         List<DeletedOverrideKey> deletedOverrides = new ArrayList<>();
+        List<StagedRollout> updatedRollouts = new ArrayList<>();
 
         // 1. Check for new or modified definitions
         for (Map.Entry<String, SettingDefinition> entry : toSnapshot.definitions().entrySet()) {
@@ -76,12 +78,21 @@ public final class SnapshotDiffCalculator {
             }
         }
 
+        // 4. Check for new or modified staged rollouts
+        for (Map.Entry<String, StagedRollout> entry : toSnapshot.stagedRollouts().entrySet()) {
+            StagedRollout oldRollout = fromSnapshot.getStagedRollout(entry.getKey());
+            if (oldRollout == null || !oldRollout.equals(entry.getValue())) {
+                updatedRollouts.add(entry.getValue());
+            }
+        }
+
         return new ConfigDelta(
                 fromSnapshot.version(),
                 toSnapshot.version(),
                 updatedDefs,
                 updatedOverrides,
-                deletedOverrides
+                deletedOverrides,
+                updatedRollouts
         );
     }
 }

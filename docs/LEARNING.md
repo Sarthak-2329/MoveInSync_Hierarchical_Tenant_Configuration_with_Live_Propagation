@@ -242,6 +242,37 @@ curl -s -X POST http://localhost:8080/api/rollback/1 \
   -H "X-API-KEY: admin-secret-key" | jq
 ```
 
+### Step 8: Staged Rollout to Canary Office & Promotion
+```bash
+# 1. Stage canary override of 45 minutes to Bangalore office only
+curl -s -X POST http://localhost:8080/api/rollout \
+  -H "X-API-KEY: operator-google-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "ro-blr-cutoff",
+    "settingKey": "booking.cutoff.minutes",
+    "targetClientId": "google",
+    "canaryOfficeIds": ["bangalore"],
+    "targetLevel": "CLIENT",
+    "stagedValue": 45.0,
+    "reason": "Test 45m cut-off in Bangalore canary office"
+  }' | jq
+
+# 2. Verify Bangalore sees canary 45.0 while Hyderabad sees baseline
+curl -s -X GET "http://localhost:8080/api/config/explain?key=booking.cutoff.minutes&client=google&office=bangalore" \
+  -H "X-API-KEY: viewer-google-key" | jq '.winningValue'
+
+# 3. Promote rollout company-wide to all Google offices
+curl -s -X POST http://localhost:8080/api/rollout/ro-blr-cutoff/promote \
+  -H "X-API-KEY: operator-google-key" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Canary successful, promoting company-wide"}' | jq
+
+# 4. Now Hyderabad also resolves 45.0
+curl -s -X GET "http://localhost:8080/api/config/explain?key=booking.cutoff.minutes&client=google&office=hyderabad" \
+  -H "X-API-KEY: viewer-google-key" | jq '.winningValue'
+```
+
 ---
 
 ## 5. Whiteboard Concepts Checklist
@@ -250,7 +281,7 @@ Be prepared to explain and sketch these 6 diagrams without notes:
 
 - [ ] **Dual-Plane Architecture:** Draw the Server (WAL + Memory Snapshot) and the Client (Memory Snapshot + Disk File), connected via SSE push and Delta pull.
 - [ ] **Atomic Reference Swap:** Explain the memory barrier semantics of `currentSnapshot.set(newSnapshot)` and why reading threads never lock or block.
-- [ ] **The 5-Level Hierarchy Pyramid:** Draw `SHIFT` on top, narrowing down through `OFFICE`, `CLIENT`, `GLOBAL Override`, to `Definition Default` at the base.
+- [ ] **The 6-Level Hierarchy Pyramid:** Draw `SHIFT` on top, narrowing down through `CANARY STAGED ROLLOUT`, `OFFICE`, `CLIENT`, `GLOBAL Override`, to `Definition Default` at the base.
 - [ ] **Push Hint + Pull Delta Sequence:** Explain why sending `{latestVersion: N}` avoids broadcast storms and how jitter prevents reconnect stampedes.
 - [ ] **Two-Phase Commit in Memory:** Sketch `ChangeSetApplier` dry-run validation loop before allocating the replacement Snapshot.
 - [ ] **Safe Disk Persistence:** Draw the temporary file creation, byte flush, and atomic POSIX rename (`ATOMIC_MOVE`).
@@ -267,6 +298,6 @@ Be prepared to explain and sketch these 6 diagrams without notes:
    - *Current:* Server-Sent Events held in Spring Boot Tomcat threads.
    - *Limitation:* File descriptor limits on single Linux containers cap open sockets at ~15,000.
    - *10x Solution:* Offload SSE connections to an edge proxy layer (Envoy / Cloudflare Workers) utilizing Redis Pub/Sub channels per tenant.
-3. **Rollout Stage Promotion:**
-   - *Current:* Changes are published immediately platform-wide or client-wide.
-   - *10x Solution:* Introduce percentage-based canary rings (`OFFICE` canary groups) with automated rollback triggered by client error rate metrics.
+3. **Staged Rollout Canary Deployment (Implemented in Stage 7):**
+   - *Capabilities:* Safe canary testing on designated offices before company-wide promotion (`POST /api/rollout/{id}/promote`) or instant zero-pollution abort (`POST /api/rollout/{id}/discard`).
+   - *10x Solution:* Introduce percentage-based hash-ring traffic splitting and automated canary rollbacks triggered by Prometheus error rate spikes.

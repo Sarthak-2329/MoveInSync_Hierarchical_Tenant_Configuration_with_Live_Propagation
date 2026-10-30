@@ -4,7 +4,9 @@ import com.moveinsync.config.core.model.ConfigDelta;
 import com.moveinsync.config.core.model.ConfigDelta.DeletedOverrideKey;
 import com.moveinsync.config.core.model.OverrideValue;
 import com.moveinsync.config.core.model.SettingDefinition;
+import com.moveinsync.config.core.model.StagedRollout;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -20,8 +22,16 @@ public record DeltaResponse(
         long currentVersion,
         List<SettingDefinition> updatedDefinitions,
         List<OverrideValue> updatedOverrides,
-        List<DeletedOverrideKey> deletedOverrides
+        List<DeletedOverrideKey> deletedOverrides,
+        List<StagedRollout> updatedRollouts
 ) {
+    public DeltaResponse {
+        updatedDefinitions = (updatedDefinitions != null) ? updatedDefinitions : Collections.emptyList();
+        updatedOverrides = (updatedOverrides != null) ? updatedOverrides : Collections.emptyList();
+        deletedOverrides = (deletedOverrides != null) ? deletedOverrides : Collections.emptyList();
+        updatedRollouts = (updatedRollouts != null) ? updatedRollouts : Collections.emptyList();
+    }
+
     public static DeltaResponse from(ConfigDelta delta, long currentVersion) {
         return new DeltaResponse(
                 delta.fromVersion(),
@@ -29,7 +39,8 @@ public record DeltaResponse(
                 currentVersion,
                 delta.updatedDefinitions(),
                 delta.updatedOverrides(),
-                delta.deletedOverrides()
+                delta.deletedOverrides(),
+                delta.updatedRollouts()
         );
     }
 }

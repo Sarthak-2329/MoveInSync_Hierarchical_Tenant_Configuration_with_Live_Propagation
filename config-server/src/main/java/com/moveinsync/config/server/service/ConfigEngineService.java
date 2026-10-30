@@ -10,10 +10,13 @@ import com.moveinsync.config.core.exception.ValidationException;
 import com.moveinsync.config.core.model.ChangeSet;
 import com.moveinsync.config.core.model.ConfigDelta;
 import com.moveinsync.config.core.model.ResolutionExplanation;
+import com.moveinsync.config.core.model.RolloutStatus;
 import com.moveinsync.config.core.model.Scope;
 import com.moveinsync.config.core.model.SettingDefinition;
 import com.moveinsync.config.core.model.Snapshot;
+import com.moveinsync.config.core.model.StagedRollout;
 import com.moveinsync.config.server.cache.TenantCacheService;
+import com.moveinsync.config.server.dto.CreateRolloutRequest;
 import com.moveinsync.config.server.dto.DeltaResponse;
 import com.moveinsync.config.server.dto.RollbackResponse;
 import com.moveinsync.config.server.metrics.ConfigMetrics;
@@ -28,6 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -231,8 +235,8 @@ public class ConfigEngineService {
             ConfigDelta diff = SnapshotDiffCalculator.calculateDiff(current, targetSnapshot);
 
             long newVersion = versionSequence.incrementAndGet();
-            // New snapshot has the exact definitions and overrides of targetSnapshot, but stamped with newVersion
-            Snapshot nextSnapshot = new Snapshot(newVersion, targetSnapshot.definitions(), targetSnapshot.overridesByKey());
+            // New snapshot has the exact definitions, overrides, and rollouts of targetSnapshot, but stamped with newVersion
+            Snapshot nextSnapshot = new Snapshot(newVersion, targetSnapshot.definitions(), targetSnapshot.overridesByKey(), targetSnapshot.stagedRollouts());
 
             // Persist rollback record
             record RollbackPayload(long targetVersion, String reason) {}
@@ -375,11 +379,203 @@ public class ConfigEngineService {
                     if (target == null) {
                         target = getSnapshotAtVersion(payload.targetVersion());
                     }
-                    yield new Snapshot(entry.getVersion(), target.definitions(), target.overridesByKey());
+                    yield new Snapshot(entry.getVersion(), target.definitions(), target.overridesByKey(), target.stagedRollouts());
+                }
+                case STAGED_ROLLOUT -> {
+                    StagedRollout rollout = objectMapper.readValue(entry.getPayloadJson(), StagedRollout.class);
+                    yield ChangeSetApplier.applyStagedRollout(current, rollout, entry.getVersion());
+                }
+                case ROLLOUT_PROMOTE -> {
+                    record RolloutActionPayload(String rolloutId, String reason) {}
+                    RolloutActionPayload payload = objectMapper.readValue(entry.getPayloadJson(), RolloutActionPayload.class);
+                    yield ChangeSetApplier.promoteStagedRollout(current, payload.rolloutId(), entry.getVersion(), entry.getAuthor(), payload.reason());
+                }
+                case ROLLOUT_DISCARD -> {
+                    record RolloutActionPayload(String rolloutId, String reason) {}
+                    RolloutActionPayload payload = objectMapper.readValue(entry.getPayloadJson(), RolloutActionPayload.class);
+                    yield ChangeSetApplier.discardStagedRollout(current, payload.rolloutId(), entry.getVersion(), entry.getAuthor(), payload.reason());
                 }
             };
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to parse log entry version " + entry.getVersion(), e);
         }
+    }
+
+    /**
+     * Creates and activates a staged configuration rollout targeting candidate offices.
+     */
+    @Transactional
+    public StagedRollout createStagedRollout(CreateRolloutRequest request, String author) {
+        writeLock.lock();
+        try {
+            Snapshot current = currentSnapshot.get();
+            long newVersion = versionSequence.incrementAndGet();
+
+            String rolloutId = (request.id() != null && !request.id().isBlank())
+                    ? request.id()
+                    : "ro-" + UUID.randomUUID().toString().substring(0, 8);
+
+            StagedRollout rollout = new StagedRollout(
+                    rolloutId,
+                    request.settingKey(),
+                    request.targetClientId(),
+                    request.canaryOfficeIds(),
+                    request.targetLevel(),
+                    request.stagedValue(),
+                    RolloutStatus.ACTIVE,
+                    author != null ? author : "system",
+                    request.reason() != null ? request.reason() : "Staged rollout to canary offices",
+                    Instant.now(),
+                    newVersion
+            );
+
+            // Step 1: Pre-validate and construct new snapshot
+            Snapshot nextSnapshot = ChangeSetApplier.applyStagedRollout(current, rollout, newVersion);
+
+            // Step 2: Persist change record to H2 database
+            String payloadJson = objectMapper.writeValueAsString(rollout);
+            ChangeLogEntity entity = new ChangeLogEntity(
+                    newVersion,
+                    rollout.author(),
+                    rollout.reason(),
+                    rollout.createdAt(),
+                    ChangeKind.STAGED_ROLLOUT,
+                    payloadJson
+            );
+            changeLogRepository.save(entity);
+
+            // Step 3: Atomic swap & history cache update
+            currentSnapshot.set(nextSnapshot);
+            snapshotHistory.put(newVersion, nextSnapshot);
+            tenantCacheService.invalidateAll();
+
+            // Step 4: Broadcast SSE push hint & record metric
+            sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
+
+            log.info("Created staged rollout '{}' for setting '{}' targeting offices {} at version {}",
+                    rollout.id(), rollout.settingKey(), rollout.canaryOfficeIds(), newVersion);
+            return nextSnapshot.getStagedRollout(rollout.id());
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize staged rollout JSON", e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Promotes an active staged rollout to the target level company-wide.
+     */
+    @Transactional
+    public StagedRollout promoteRollout(String rolloutId, String author, String reason) {
+        writeLock.lock();
+        try {
+            Snapshot current = currentSnapshot.get();
+            long newVersion = versionSequence.incrementAndGet();
+
+            String effectiveAuthor = author != null ? author : "system";
+            String effectiveReason = reason != null ? reason : "Promote staged rollout " + rolloutId;
+
+            // Step 1: Pre-validate and construct new snapshot with permanent override
+            Snapshot nextSnapshot = ChangeSetApplier.promoteStagedRollout(current, rolloutId, newVersion, effectiveAuthor, effectiveReason);
+
+            // Step 2: Persist promotion log entry
+            record RolloutActionPayload(String rolloutId, String reason) {}
+            String payloadJson = objectMapper.writeValueAsString(new RolloutActionPayload(rolloutId, effectiveReason));
+            ChangeLogEntity entity = new ChangeLogEntity(
+                    newVersion,
+                    effectiveAuthor,
+                    effectiveReason,
+                    Instant.now(),
+                    ChangeKind.ROLLOUT_PROMOTE,
+                    payloadJson
+            );
+            changeLogRepository.save(entity);
+
+            // Step 3: Atomic swap
+            currentSnapshot.set(nextSnapshot);
+            snapshotHistory.put(newVersion, nextSnapshot);
+            tenantCacheService.invalidateAll();
+
+            // Step 4: Broadcast & metric
+            sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
+
+            log.info("Promoted staged rollout '{}' to company-wide target level at version {}", rolloutId, newVersion);
+            return nextSnapshot.getStagedRollout(rolloutId);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize rollout promotion JSON", e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Discards an active staged rollout; canary offices immediately revert to baseline.
+     */
+    @Transactional
+    public StagedRollout discardRollout(String rolloutId, String author, String reason) {
+        writeLock.lock();
+        try {
+            Snapshot current = currentSnapshot.get();
+            long newVersion = versionSequence.incrementAndGet();
+
+            String effectiveAuthor = author != null ? author : "system";
+            String effectiveReason = reason != null ? reason : "Discard staged rollout " + rolloutId;
+
+            // Step 1: Pre-validate and construct new snapshot
+            Snapshot nextSnapshot = ChangeSetApplier.discardStagedRollout(current, rolloutId, newVersion, effectiveAuthor, effectiveReason);
+
+            // Step 2: Persist discard log entry
+            record RolloutActionPayload(String rolloutId, String reason) {}
+            String payloadJson = objectMapper.writeValueAsString(new RolloutActionPayload(rolloutId, effectiveReason));
+            ChangeLogEntity entity = new ChangeLogEntity(
+                    newVersion,
+                    effectiveAuthor,
+                    effectiveReason,
+                    Instant.now(),
+                    ChangeKind.ROLLOUT_DISCARD,
+                    payloadJson
+            );
+            changeLogRepository.save(entity);
+
+            // Step 3: Atomic swap
+            currentSnapshot.set(nextSnapshot);
+            snapshotHistory.put(newVersion, nextSnapshot);
+            tenantCacheService.invalidateAll();
+
+            // Step 4: Broadcast & metric
+            sseBroadcaster.broadcast(newVersion);
+            configMetrics.recordChangeApplied();
+
+            log.info("Discarded staged rollout '{}' at version {}", rolloutId, newVersion);
+            return nextSnapshot.getStagedRollout(rolloutId);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize rollout discard JSON", e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Retrieves all staged rollouts accessible to the caller's tenant.
+     */
+    public List<StagedRollout> getStagedRollouts(String tenantId, RolloutStatus status) {
+        Snapshot tenantSnapshot = getCurrentSnapshot(tenantId);
+        return tenantSnapshot.stagedRollouts().values().stream()
+                .filter(r -> status == null || r.status() == status)
+                .toList();
+    }
+
+    /**
+     * Retrieves a single staged rollout by ID if accessible to caller's tenant.
+     */
+    public StagedRollout getStagedRollout(String rolloutId, String tenantId) {
+        Snapshot tenantSnapshot = getCurrentSnapshot(tenantId);
+        StagedRollout rollout = tenantSnapshot.getStagedRollout(rolloutId);
+        if (rollout == null) {
+            throw new ValidationException("Staged rollout '" + rolloutId + "' not found");
+        }
+        return rollout;
     }
 }
