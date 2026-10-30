@@ -18,6 +18,7 @@ public final class ClientConfig {
     private final Duration maxJitter;
     private final HttpClient httpClient;
     private final boolean startBackgroundSync;
+    private final java.util.concurrent.ScheduledExecutorService scheduledExecutor;
 
     private ClientConfig(Builder builder) {
         this.serverUrl = Objects.requireNonNull(builder.serverUrl, "serverUrl must not be null");
@@ -28,6 +29,7 @@ public final class ClientConfig {
         this.maxJitter = builder.maxJitter;
         this.httpClient = builder.httpClient;
         this.startBackgroundSync = builder.startBackgroundSync;
+        this.scheduledExecutor = builder.scheduledExecutor;
     }
 
     public static Builder builder() {
@@ -66,6 +68,10 @@ public final class ClientConfig {
         return startBackgroundSync;
     }
 
+    public java.util.concurrent.ScheduledExecutorService getScheduledExecutor() {
+        return scheduledExecutor;
+    }
+
     public static final class Builder {
         private String serverUrl;
         private String apiKey;
@@ -75,6 +81,7 @@ public final class ClientConfig {
         private Duration maxJitter = Duration.ofSeconds(1);
         private HttpClient httpClient;
         private boolean startBackgroundSync = true;
+        private java.util.concurrent.ScheduledExecutorService scheduledExecutor;
 
         public Builder serverUrl(String serverUrl) {
             this.serverUrl = serverUrl;
@@ -113,6 +120,11 @@ public final class ClientConfig {
 
         public Builder startBackgroundSync(boolean startBackgroundSync) {
             this.startBackgroundSync = startBackgroundSync;
+            return this;
+        }
+
+        public Builder scheduledExecutor(java.util.concurrent.ScheduledExecutorService scheduledExecutor) {
+            this.scheduledExecutor = scheduledExecutor;
             return this;
         }
 

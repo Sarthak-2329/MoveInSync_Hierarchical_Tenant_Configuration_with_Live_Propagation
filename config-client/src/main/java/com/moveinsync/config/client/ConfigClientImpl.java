@@ -45,6 +45,7 @@ public final class ConfigClientImpl implements ConfigClient {
     private final HttpConfigSync httpSync;
     private final SseSubscriber sseSubscriber;
     private final ScheduledExecutorService pollerExecutor;
+    private final boolean ownExecutor;
 
     private final ReentrantLock syncLock = new ReentrantLock();
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -60,13 +61,19 @@ public final class ConfigClientImpl implements ConfigClient {
         // Step 2: Initialize HTTP sync engine
         this.httpSync = new HttpConfigSync(config.getHttpClient());
 
-        // Step 3: Thread factory for background scheduled poller
-        ThreadFactory threadFactory = r -> {
-            Thread t = new Thread(r, "config-client-poller");
-            t.setDaemon(true);
-            return t;
-        };
-        this.pollerExecutor = Executors.newSingleThreadScheduledExecutor(threadFactory);
+        // Step 3: Thread factory / executor for background scheduled poller
+        if (config.getScheduledExecutor() != null) {
+            this.pollerExecutor = config.getScheduledExecutor();
+            this.ownExecutor = false;
+        } else {
+            ThreadFactory threadFactory = r -> {
+                Thread t = new Thread(r, "config-client-poller");
+                t.setDaemon(true);
+                return t;
+            };
+            this.pollerExecutor = Executors.newSingleThreadScheduledExecutor(threadFactory);
+            this.ownExecutor = true;
+        }
 
         // Step 4: Initialize SSE subscriber with on-demand sync callback
         this.sseSubscriber = new SseSubscriber(
@@ -234,11 +241,13 @@ public final class ConfigClientImpl implements ConfigClient {
             } catch (Exception e) {
                 log.warn("Error closing SSE subscriber: {}", e.getMessage());
             }
-            pollerExecutor.shutdownNow();
-            try {
-                pollerExecutor.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
+            if (ownExecutor) {
+                pollerExecutor.shutdownNow();
+                try {
+                    pollerExecutor.awaitTermination(2, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
